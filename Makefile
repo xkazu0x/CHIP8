@@ -1,5 +1,5 @@
 CC := g++
-CFLAGS := -std=c++17 -Wall -Wextra -Werror -Wpadded -O0 -Wno-unused-parameter -Wno-unused-variable -Wno-unused-function -Wno-write-strings
+CFLAGS := -std=c++17 -g -Wall -Wextra -Werror -Wpadded -O0 -Wno-unused-parameter -Wno-unused-variable -Wno-unused-function -Wno-write-strings
 DEFINES := -DEXCALIBUR_INTERNAL=1 -DEXCALIBUR_DEBUG=1
 INCLUDES := -I.
 LIBS := -lkernel32 -luser32 -lgdi32 -lwinmm

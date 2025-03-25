@@ -1,4 +1,35 @@
-#include "excalibur_window_win32.h"
+internal void
+win32_resize_bitmap(os_window_t *window, vec2i size) {
+    win32_t *platform = (win32_t *)window->platform;
+    bitmap_t *bitmap = &window->bitmap;
+    
+    if (bitmap->memory) {
+        VirtualFree(bitmap->memory, 0, MEM_RELEASE);
+    }
+
+    bitmap->size = size;
+    bitmap->bytes_per_pixel = 4;
+    bitmap->pitch = bitmap->size.x * bitmap->bytes_per_pixel;
+    
+    platform->bitmap_info.bmiHeader.biSize = sizeof(platform->bitmap_info.bmiHeader);
+    platform->bitmap_info.bmiHeader.biWidth = bitmap->size.x;
+    platform->bitmap_info.bmiHeader.biHeight = -bitmap->size.y;
+    platform->bitmap_info.bmiHeader.biPlanes = 1;
+    platform->bitmap_info.bmiHeader.biBitCount = 32;
+    platform->bitmap_info.bmiHeader.biCompression = BI_RGB;
+
+    s32 bitmap_memory_size = (bitmap->size.x * bitmap->size.y) * bitmap->bytes_per_pixel;
+    bitmap->memory = VirtualAlloc(0, bitmap_memory_size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+}
+
+internal vec2i
+win32_get_window_size(HWND window) {
+    RECT client_rectangle;
+    GetClientRect(window, &client_rectangle);
+    s32 window_width = client_rectangle.right - client_rectangle.left;
+    s32 window_height = client_rectangle.bottom - client_rectangle.top;
+    return(vec2i_create(window_width, window_height));
+}
 
 internal void
 win32_window_toggle_fullscreen(HWND window, WINDOWPLACEMENT *placement) {
@@ -32,10 +63,6 @@ win32_window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
         case WM_DESTROY: {
             PostQuitMessage(0);
         } break;
-        case WM_SIZE: {
-            //vec2i window_size = win32_get_window_size(window);
-            //win32_resize_bitmap(&g_bitmap, window_size);
-        } break;
         default: {
             result = DefWindowProcA(window, message, wparam, lparam);
         }
@@ -44,7 +71,7 @@ win32_window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
 }
 
 internal b32
-window_create(window_t *window, window_info_t info) {
+os_window_create(os_window_t *window, os_window_info_t info) {
     window->platform = VirtualAlloc(0, sizeof(win32_t), MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
 
     win32_t *platform = (win32_t *)window->platform;
@@ -59,23 +86,20 @@ window_create(window_t *window, window_info_t info) {
     EXINFO("> monitor size: %dx%d", monitor_size.x, monitor_size.y);
     EXINFO("> monitor refresh rate: %dHz", monitor_refresh_rate);
 
-    window->title = info.title;
-    window->size = info.size;
-    window->position = (monitor_size - window->size) / 2;
-    EXINFO("> window size: %dx%d", window->size.x, window->size.y);
-    EXINFO("> window position: x:%d y:%d", window->position.x, window->position.y);
-
-    s32 window_width = window->size.x;
-    s32 window_height = window->size.y;
+    char *window_title = info.title;
+    vec2i window_size = info.size;
+    vec2i window_position = (monitor_size - window_size) / 2;
+    EXINFO("> window size: %dx%d", window_size.x, window_size.y);
+    EXINFO("> window position: x:%d y:%d", window_position.x, window_position.y);
 
     RECT window_rectangle = {};
     window_rectangle.left = 0;
-    window_rectangle.right = window_width;
+    window_rectangle.right = window_size.x;
     window_rectangle.top = 0;
-    window_rectangle.bottom = window_height;
+    window_rectangle.bottom = window_size.y;
     if (AdjustWindowRect(&window_rectangle, WS_OVERLAPPEDWINDOW, 0)) {
-        window_width = window_rectangle.right - window_rectangle.left;
-        window_height = window_rectangle.bottom - window_rectangle.top;
+        window_size.x = window_rectangle.right - window_rectangle.left;
+        window_size.y = window_rectangle.bottom - window_rectangle.top;
     }
     
     WNDCLASSA window_class = {};
@@ -100,9 +124,9 @@ window_create(window_t *window, window_info_t info) {
     u32 window_style_ex = 0;
 
     platform->window_handle = CreateWindowExA(window_style_ex, MAKEINTATOM(platform->window_atom),
-                                              window->title, window_style,
-                                              window->position.x, window->position.y,
-                                              window_width, window_height,
+                                              window_title, window_style,
+                                              window_position.x, window_position.y,
+                                              window_size.x, window_size.y,
                                               0, 0, platform->window_instance, 0);
     if (!platform->window_handle) {
         EXFATAL("< failed to create win32 window");
@@ -115,7 +139,9 @@ window_create(window_t *window, window_info_t info) {
         window->fullscreen = info.fullscreen;
     }
     ShowWindow(platform->window_handle, SW_SHOW);
-
+    
+    win32_resize_bitmap(window, info.bitmap_size);
+    
     RAWINPUTDEVICE raw_input_device = {};
     raw_input_device.usUsagePage = 0x01;
     raw_input_device.usUsage = 0x02;
@@ -129,14 +155,15 @@ window_create(window_t *window, window_info_t info) {
 }
 
 internal void
-window_destroy(window_t window) {
-    win32_t *platform = (win32_t *)window.platform;
+os_window_destroy(os_window_t *window) {
+    win32_t *platform = (win32_t *)window->platform;
     UnregisterClassA(MAKEINTATOM(platform->window_atom), platform->window_instance);
     DestroyWindow(platform->window_handle);
+    VirtualFree(platform, 0, MEM_RELEASE);
 }
 
 internal void
-window_update(window_t *window) {
+os_window_update(os_window_t *window) {
     win32_t *platform = (win32_t *)window->platform;
     input_t *input = &window->input;
 
@@ -174,27 +201,27 @@ window_update(window_t *window) {
                         b32 left_button_down = input->mouse.left.down;
                         if (button_flags & RI_MOUSE_LEFT_BUTTON_DOWN) left_button_down = EX_TRUE;
                         if (button_flags & RI_MOUSE_LEFT_BUTTON_UP) left_button_down = EX_FALSE;
-                        _window_process_digital_button(&input->mouse.left, left_button_down);
+                        _os_window_process_digital_button(&input->mouse.left, left_button_down);
 
                         b32 right_button_down = input->mouse.right.down;
                         if (button_flags & RI_MOUSE_RIGHT_BUTTON_DOWN) right_button_down = EX_TRUE;
                         if (button_flags & RI_MOUSE_RIGHT_BUTTON_UP) right_button_down = EX_FALSE;
-                        _window_process_digital_button(&input->mouse.right, right_button_down);
+                        _os_window_process_digital_button(&input->mouse.right, right_button_down);
                             
                         b32 middle_button_down = input->mouse.middle.down;
                         if (button_flags & RI_MOUSE_MIDDLE_BUTTON_DOWN) middle_button_down = EX_TRUE;
                         if (button_flags & RI_MOUSE_MIDDLE_BUTTON_UP) middle_button_down = EX_FALSE;
-                        _window_process_digital_button(&input->mouse.middle, middle_button_down);
+                        _os_window_process_digital_button(&input->mouse.middle, middle_button_down);
 
                         b32 x1_button_down = input->mouse.x1.down;
                         if (button_flags & RI_MOUSE_BUTTON_4_DOWN) x1_button_down = EX_TRUE;
                         if (button_flags & RI_MOUSE_BUTTON_4_UP) x1_button_down = EX_FALSE;
-                        _window_process_digital_button(&input->mouse.x1, x1_button_down);
+                        _os_window_process_digital_button(&input->mouse.x1, x1_button_down);
                             
                         b32 x2_button_down = input->mouse.x2.down;
                         if (button_flags & RI_MOUSE_BUTTON_5_DOWN) x2_button_down = EX_TRUE;
                         if (button_flags & RI_MOUSE_BUTTON_5_UP) x2_button_down = EX_FALSE;
-                        _window_process_digital_button(&input->mouse.x2, x2_button_down);
+                        _os_window_process_digital_button(&input->mouse.x2, x2_button_down);
                             
                         if (raw_input->data.mouse.usButtonFlags & RI_MOUSE_WHEEL) {
                             input->mouse.delta_wheel += ((SHORT)raw_input->data.mouse.usButtonData) / WHEEL_DELTA;
@@ -214,45 +241,79 @@ window_update(window_t *window) {
     BYTE keyboard_state[KEY_MAX];
     if (!GetKeyboardState(keyboard_state)) return;
     for (s32 key = 0; key < KEY_MAX; key++) {
-        _window_process_digital_button(input->keyboard + key, keyboard_state[key] >> 7);
+        _os_window_process_digital_button(input->keyboard + key, keyboard_state[key] >> 7);
     }
 
     if (input->keyboard[VK_F11].pressed) {
         win32_window_toggle_fullscreen(platform->window_handle, &platform->window_placement);
         window->fullscreen = !window->fullscreen;
     }
+
+    vec2i window_size = win32_get_window_size(platform->window_handle);
     
     input->mouse.wheel += input->mouse.delta_wheel;
     
     POINT mouse_position;
     GetCursorPos(&mouse_position);
     ScreenToClient(platform->window_handle, &mouse_position);
-
+    
     if (mouse_position.x < 0) mouse_position.x = 0;
     if (mouse_position.y < 0) mouse_position.y = 0;
-    if (mouse_position.x > window->size.x) mouse_position.x = window->size.x;
-    if (mouse_position.y > window->size.y) mouse_position.y = window->size.y;
+    if (mouse_position.x > window_size.x) mouse_position.x = window_size.x;
+    if (mouse_position.y > window_size.y) mouse_position.y = window_size.y;
 
     input->mouse.position.x = mouse_position.x;
     input->mouse.position.y = mouse_position.y;
+}
 
-    RECT client_rectangle;
-    GetClientRect(platform->window_handle, &client_rectangle);
-    
-    s32 new_window_width = client_rectangle.right - client_rectangle.left;
-    s32 new_window_height = client_rectangle.bottom - client_rectangle.top;
-    if ((window->size.x != new_window_width) ||
-        (window->size.y != new_window_height)) {
-        window->size.x = new_window_width;
-        window->size.y = new_window_height;
-    }
+internal void
+os_window_clear(os_window_t *window, vec3f color) {
+    u32 out_color = (((u32)(color.r * 255.0f) << 16) |
+                     ((u32)(color.g * 255.0f) << 8) |
+                     ((u32)(color.b * 255.0f) << 0));
 
-    RECT window_rectangle;
-    GetWindowRect(platform->window_handle, &window_rectangle);
+    bitmap_t *bitmap = &window->bitmap;
+    u8 *row = (u8 *)bitmap->memory;
     
-    if ((window->position.x != window_rectangle.left) ||
-        (window->position.y != window_rectangle.top)) {
-        window->position.x = window_rectangle.left;
-        window->position.y = window_rectangle.top;
+    for (s32 y = 0; y < bitmap->size.y; ++y) {
+        u32 *pixel = (u32 *)row;
+        for (s32 x = 0; x < bitmap->size.x; ++x) {
+            *pixel++ = out_color;
+        }
+        row += bitmap->pitch;
     }
+}
+
+internal void
+os_window_present(os_window_t *window) {
+    win32_t *platform = (win32_t *)window->platform;
+    vec2i window_size = win32_get_window_size(platform->window_handle);
+    HDC window_device = GetDC(platform->window_handle);
+    StretchDIBits(window_device,
+                  0, 0, window_size.x, window_size.y,
+                  0, 0, window->bitmap.size.x, window->bitmap.size.y,
+                  window->bitmap.memory,
+                  &platform->bitmap_info,
+                  DIB_RGB_COLORS, SRCCOPY);
+    ReleaseDC(platform->window_handle, window_device);
+}
+
+internal b32
+os_init(os_t *os) {
+    LARGE_INTEGER large_integer;
+    QueryPerformanceFrequency(&large_integer);
+    os->ticks_per_frame = large_integer.QuadPart;
+    return(EX_TRUE);
+}
+
+internal s64
+os_get_time() {
+    LARGE_INTEGER result;
+    QueryPerformanceCounter(&result);
+    return(result.QuadPart);
+}
+
+internal void
+os_sleep_ms(u32 ms) {
+    Sleep(ms);
 }
